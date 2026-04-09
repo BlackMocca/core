@@ -959,7 +959,7 @@ int Binary_pPrReader::ReadContent(BYTE type, long length, void* poResult)
 			case align_Left: pPPr->m_oJc->m_oVal->SetValueFromByte(8); break;
 			case align_Center: pPPr->m_oJc->m_oVal->SetValueFromByte(1); break;
 			case align_Justify: pPPr->m_oJc->m_oVal->SetValueFromByte(0); break;
-			case align_Distributed: pPPr->m_oJc->m_oVal->SetValueFromByte(2); break; // jcDistribute
+			case align_Distributed: pPPr->m_oJc->m_oVal->SetValueFromByte(9); break; // jcThaiDistribute
 		}
 	}break;
 	case c_oSerProp_pPrType::KeepLines:
