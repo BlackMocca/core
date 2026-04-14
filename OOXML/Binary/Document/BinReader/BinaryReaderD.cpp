@@ -32,6 +32,8 @@
 
 #include "BinaryReaderD.h"
 
+#include <mutex>
+
 #include "../BinWriter/BinReaderWriterDefines.h"
 #include "../../Sheets/Writer/BinaryReaderS.h"
 
@@ -4842,9 +4844,95 @@ Binary_DocumentTableReader::Binary_DocumentTableReader(NSBinPptxRW::CBinaryFileR
 	m_bUsedParaIdCounter = false;
 	m_byteLastElemType = c_oSerParType::Content;
 	m_pCurWriter = NULL;
+	m_bIsThaiDistribute = false;
 }
 Binary_DocumentTableReader::~Binary_DocumentTableReader()
 {
+}
+
+// Static shared instance for the Thai word breaker (lazy-initialised once).
+ThaiWordBreaker* Binary_DocumentTableReader::s_pSharedThaiBreaker = nullptr;
+
+ThaiWordBreaker& Binary_DocumentTableReader::GetThaiBreaker()
+{
+	static std::once_flag s_initFlag;
+	std::call_once(s_initFlag, []() {
+		s_pSharedThaiBreaker = new ThaiWordBreaker();
+		// Try standard install path (matches Dockerfile COPY destination),
+		// then fall back to common alternatives.
+		static const char* kDictPaths[] = {
+			"/var/www/onlyoffice/documentserver/dictionary/words_th.txt",
+			"/etc/onlyoffice/documentserver/dictionary/words_th.txt",
+			nullptr
+		};
+		for (int i = 0; kDictPaths[i] != nullptr; ++i)
+		{
+			if (s_pSharedThaiBreaker->Init(kDictPaths[i]))
+				break;
+		}
+	});
+	return *s_pSharedThaiBreaker;
+}
+
+void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& sText)
+{
+	ThaiWordBreaker& breaker = GetThaiBreaker();
+
+	if (!breaker.IsLoaded())
+	{
+		// No dictionary: write text as-is, no word breaks
+		std::wstring sEncoded = XmlUtils::EncodeXmlString(sText);
+		GetCurrentStringWriter().WriteString(std::wstring(L"<w:t xml:space=\"preserve\">") + sEncoded + L"</w:t>");
+		return;
+	}
+
+	std::vector<std::wstring> words = breaker.Segment(sText);
+	if (words.empty())
+		return;
+
+	// Emit first word/segment as <w:t>
+	// Between each Thai word boundary emit </w:t><w:br/><w:t xml:space="preserve">
+	// Non-Thai segments and single unmatched Thai chars are also emitted without a break.
+	// A break is only inserted BETWEEN two segments where the PREVIOUS segment ends with
+	// a Thai character (= a real word boundary).
+
+	std::wstring sAccum;
+	for (size_t i = 0; i < words.size(); ++i)
+	{
+		const std::wstring& seg = words[i];
+
+		if (i > 0)
+		{
+			// Insert a word-break before this segment only when BOTH the previous
+			// segment ended with Thai AND the current segment starts with Thai.
+			// This avoids inserting <w:br/> between the last Thai word and
+			// following non-Thai text (e.g., "ทำงาน World").
+			const std::wstring& prev = words[i - 1];
+			bool prevEndsWithThai = !prev.empty() && ThaiWordBreaker::IsThai(prev.back());
+			bool curStartsWithThai = !seg.empty() && ThaiWordBreaker::IsThai(seg.front());
+
+			if (prevEndsWithThai && curStartsWithThai)
+			{
+				// Flush accumulated text, emit <w:br/>, start fresh
+				if (!sAccum.empty())
+				{
+					std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
+					GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
+					sAccum.clear();
+				}
+				GetCurrentStringWriter().WriteString(std::wstring(L"<w:br/>"));
+			}
+		}
+
+		sAccum += seg;
+	}
+
+	// Flush remaining text
+	if (!sAccum.empty())
+	{
+		std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
+		GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
+	}
 }
 int Binary_DocumentTableReader::Read()
 {
@@ -5174,10 +5262,16 @@ int Binary_DocumentTableReader::ReadParagraph(BYTE type, long length, void* poRe
 			std::wstring sParaPr = m_oCur_pPr.toXML();
 			GetCurrentStringWriter().WriteString(sParaPr);
 		}
+		// Detect Thai Distributed alignment for this paragraph
+		m_bIsThaiDistribute = m_oCur_pPr.m_oJc.IsInit() &&
+		                      m_oCur_pPr.m_oJc->m_oVal.IsInit() &&
+		                      (m_oCur_pPr.m_oJc->m_oVal->GetValue() == SimpleTypes::jcThaiDistribute);
 	}
 	else if ( c_oSerParType::Content == type )
 	{
 		READ1_DEF(length, res, this->ReadParagraphContent, NULL);
+		// Reset Thai-distribute flag after paragraph content is fully read
+		m_bIsThaiDistribute = false;
 	}
 	else if (c_oSerParType::ParaID == type)
 	{
@@ -8296,11 +8390,21 @@ int Binary_DocumentTableReader::ReadRunContent(BYTE type, long length, void* poR
 
 	if (c_oSerRunType::run == type)
 	{
-        GetCurrentStringWriter().WriteString(std::wstring(_T("<w:t xml:space=\"preserve\">")));
-        std::wstring sText(m_oBufferedStream.GetString3(length));
-		sText = XmlUtils::EncodeXmlString(sText);
-		GetCurrentStringWriter().WriteString(sText);
-        GetCurrentStringWriter().WriteString(std::wstring(_T("</w:t>")));
+		std::wstring sText(m_oBufferedStream.GetString3(length));
+		if (m_bIsThaiDistribute)
+		{
+			// Thai Distributed: segment Thai words and insert <w:br/> at boundaries.
+			// This handles paragraphs that were off-screen during JS serialization
+			// (GetLinesCount() == 0) and therefore had no line-break bytes injected.
+			WriteThaiDistributeRunText(sText);
+		}
+		else
+		{
+			GetCurrentStringWriter().WriteString(std::wstring(_T("<w:t xml:space=\"preserve\">")));
+			sText = XmlUtils::EncodeXmlString(sText);
+			GetCurrentStringWriter().WriteString(sText);
+			GetCurrentStringWriter().WriteString(std::wstring(_T("</w:t>")));
+		}
 	}
 	else if (c_oSerRunType::delText == type)
 	{

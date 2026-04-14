@@ -33,6 +33,7 @@
 
 #include "FileWriter.h"
 #include "ReaderClasses.h"
+#include "ThaiWordBreaker.h"
 
 #include "../../../../DesktopEditor/common/StringBuilder.h"
 
@@ -296,6 +297,10 @@ private:
 	nullable<SimpleTypes::CLongHexNumber> m_oTextId;
 
 	BYTE                            m_byteLastElemType;
+
+	// Thai Distributed support
+	bool                            m_bIsThaiDistribute;
+	static ThaiWordBreaker*         s_pSharedThaiBreaker; // lazy-init shared instance
 public:
     Writers::ContentWriter&         m_oDocumentWriter;
     Writers::MediaWriter&           m_oMediaWriter;
@@ -491,6 +496,10 @@ public:
 	int ReadSdtTextFormPrFormat(BYTE type, long length, void* poResult);
 	int ReadSdtPicture(BYTE type, long length, void* poResult);
 	int ReadSdtComplexFormPr(BYTE type, long length, void* poResult);
+
+	// Thai Distributed helper
+	void WriteThaiDistributeRunText(const std::wstring& sText);
+	ThaiWordBreaker& GetThaiBreaker();
 };
 class Binary_NotesTableReader : public Binary_CommonReader
 {

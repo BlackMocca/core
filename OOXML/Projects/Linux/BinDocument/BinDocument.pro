@@ -48,6 +48,7 @@ SOURCES += \
         ../../../Binary/Draw/BinaryReaderV.cpp \
         ../../../Binary/Document/BinReader/ReaderClasses.cpp \
         ../../../Binary/Document/BinReader/BinaryReaderD.cpp \
+        ../../../Binary/Document/BinReader/ThaiWordBreaker.cpp \
 	../../../Binary/Document/BinReader/CustomXmlWriter.cpp \
 	../../../Binary/Document/BinReader/FileWriter.cpp \
 	../../../Binary/Document/BinReader/ChartWriter.cpp \
@@ -91,6 +92,7 @@ HEADERS += \
 	../../../Binary/Document/BinReader/NumberingWriter.h \
 	../../../Binary/Document/BinReader/ReaderClasses.h \
         ../../../Binary/Document/BinReader/BinaryReaderD.h \
+        ../../../Binary/Document/BinReader/ThaiWordBreaker.h \
 	../../../Binary/Document/BinReader/SettingWriter.h \
 	../../../Binary/Document/BinReader/StylesWriter.h \
 	../../../Binary/Document/BinWriter/BinEquationWriter.h \
