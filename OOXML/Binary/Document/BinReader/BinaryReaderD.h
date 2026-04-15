@@ -303,6 +303,8 @@ private:
 	bool                            m_bIsThaiDistribute;
 	static ThaiWordBreaker*         s_pSharedThaiBreaker; // lazy-init shared instance
 	double                          m_dPageTextWidthPt;   // page text width in points (updated from sectPr)
+	double                          m_dThaiAccumWidthPt;  // accumulated line width across runs in current para
+	bool                            m_bThaiFirstLineDone; // false = still on first line (firstLine indent applies)
 public:
     Writers::ContentWriter&         m_oDocumentWriter;
     Writers::MediaWriter&           m_oMediaWriter;
@@ -504,6 +506,7 @@ public:
 	ThaiWordBreaker& GetThaiBreaker();
 	void UpdatePageSizeFromSectPr(const OOX::Logic::CSectionProperty& oSectPr);
 	double MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr, const std::wstring& sWord) const;
+	void PreScanForPageDimensions(); // pre-scan binary to extract sectPr page size before processing paragraphs
 };
 class Binary_NotesTableReader : public Binary_CommonReader
 {

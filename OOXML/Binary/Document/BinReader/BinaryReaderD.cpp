@@ -4849,6 +4849,8 @@ Binary_DocumentTableReader::Binary_DocumentTableReader(NSBinPptxRW::CBinaryFileR
 	m_byteLastElemType = c_oSerParType::Content;
 	m_pCurWriter = NULL;
 	m_bIsThaiDistribute = false;
+	m_dThaiAccumWidthPt = 0.0;
+	m_bThaiFirstLineDone = false;
 	// Default: A4 (210mm) minus standard margins (25.4mm each side) = 159.2mm → ~453pt
 	m_dPageTextWidthPt = 159.2 * 72.0 / 25.4;
 }
@@ -4885,6 +4887,18 @@ void Binary_DocumentTableReader::UpdatePageSizeFromSectPr(const OOX::Logic::CSec
 
 // Measure the advance width (in points) of a string using the given IFontManager.
 // The font must already be loaded via LoadFontByName before calling this.
+// Thai non-spacing marks (Unicode Mn category within the Thai block):
+// These glyphs sit above/below the base consonant and carry zero advance width.
+// Skipping them avoids overestimating line width when IFontManager returns a
+// non-zero advance for them (font-renderer dependent).
+// Ranges: U+0E31, U+0E34-U+0E3A, U+0E47-U+0E4E
+static inline bool IsThaiCombining(wchar_t c)
+{
+	return (c == 0x0E31) ||
+	       (c >= 0x0E34 && c <= 0x0E3A) ||
+	       (c >= 0x0E47 && c <= 0x0E4E);
+}
+
 double Binary_DocumentTableReader::MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr,
                                                        const std::wstring& sWord) const
 {
@@ -4893,6 +4907,8 @@ double Binary_DocumentTableReader::MeasureWordWidthPt(NSFonts::IFontManager* pFo
 	double dWidth = 0.0;
 	for (wchar_t c : sWord)
 	{
+		if (IsThaiCombining(c))
+			continue; // zero advance — skip to avoid overcount
 		TBBoxAdvance adv = pFontMgr->MeasureChar2(static_cast<LONG>(c));
 		dWidth += static_cast<double>(adv.fAdvanceX);
 	}
@@ -5035,11 +5051,6 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		if (dBodyWidthPt < 36.0) // sanity: minimum 0.5 inch
 			dBodyWidthPt = 36.0;
 	}
-	// Width for the current line (starts as first-line, switches to body after first break)
-	double dEffectiveWidthPt = dBodyWidthPt - dFirstLineExtraPt;
-	if (dEffectiveWidthPt < 36.0)
-		dEffectiveWidthPt = 36.0;
-
 	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
 	NSFonts::IFontManager* pFontMgr = m_oFontTableWriter.GetFontManager();
 	bool bHasFontMetrics = false;
@@ -5053,6 +5064,13 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		}
 	}
 
+	// Effective width: depends on which line we're on.
+	// m_bThaiFirstLineDone persists across runs; flushAndBreak() sets it to true.
+	auto getEffectiveWidth = [&]() -> double {
+		double w = m_bThaiFirstLineDone ? dBodyWidthPt : (dBodyWidthPt - dFirstLineExtraPt);
+		return (w < 36.0) ? 36.0 : w;
+	};
+
 	auto flushAndBreak = [&]()
 	{
 		// Close current run, emit dedicated <w:br/> run, open next run
@@ -5062,10 +5080,15 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		GetCurrentStringWriter().WriteString(L"<w:br/></w:r><w:r>");
 		if (!sRprXml.empty())
 			GetCurrentStringWriter().WriteString(sRprXml);
+		// After first break, subsequent lines use body width (no firstLine indent)
+		m_bThaiFirstLineDone = true;
+		// m_dThaiAccumWidthPt is set by the caller to the width of the first word on the new line
 	};
 
 	std::wstring sAccum;
-	double dAccumWidthPt = 0.0; // accumulated line width in points
+	// m_dThaiAccumWidthPt carries the accumulated line width from all previous runs
+	// in this paragraph (cross-run accumulation). JS linebreak bytes are suppressed so
+	// C++ is solely responsible for all break positions.
 
 	for (size_t i = 0; i < words.size(); ++i)
 	{
@@ -5084,7 +5107,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 				    ? MeasureWordWidthPt(pFontMgr, seg)
 				    : 0.0;
 
-				if (bHasFontMetrics && (dAccumWidthPt + dSegWidthPt > dEffectiveWidthPt))
+				if (bHasFontMetrics && (m_dThaiAccumWidthPt + dSegWidthPt > getEffectiveWidth()))
 				{
 					// Flush accumulated text before break
 					if (!sAccum.empty())
@@ -5094,24 +5117,22 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 						sAccum.clear();
 					}
 					flushAndBreak();
-					// After the first break, subsequent lines use body width (no firstLine indent)
-					dEffectiveWidthPt = dBodyWidthPt;
-					dAccumWidthPt = dSegWidthPt;
+					m_dThaiAccumWidthPt = dSegWidthPt; // new line starts with this word
 					sAccum += seg;
 					continue;
 				}
 				// No break: advance width accumulates
 				if (bHasFontMetrics)
-					dAccumWidthPt += dSegWidthPt;
+					m_dThaiAccumWidthPt += dSegWidthPt;
 			}
 			else if (bHasFontMetrics)
 			{
-				dAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
+				m_dThaiAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
 			}
 		}
 		else if (bHasFontMetrics)
 		{
-			dAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
+			m_dThaiAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
 		}
 
 		sAccum += seg;
@@ -5124,8 +5145,114 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
 	}
 }
+// Pre-scan the document body binary to find the body-level sectPr and extract page
+// dimensions BEFORE paragraphs are processed.  The sectPr (c_oSerParType::sectPr = 4)
+// appears at the END of the body stream, so paragraphs processed before it would
+// otherwise use the hardcoded default width.
+//
+// Uses GetPosition/SetPosition to restore the stream after scanning.
+// Does NOT call Read_SecPr (avoids double-writing to m_oSecPr); instead reads
+// pgSz/pgMar cells inline using the same type codes as Binary_pPrReader.
+void Binary_DocumentTableReader::PreScanForPageDimensions()
+{
+	if (!m_oBufferedStream.Peek(4)) return;
+	_UINT32 nSavedPos = m_oBufferedStream.GetPosition();
+
+	// READ_TABLE_DEF format: (totalLen: 4 bytes)(cells: READ1_DEF format)
+	long totalLen = m_oBufferedStream.GetLong();
+	if (totalLen <= 0) { m_oBufferedStream.SetPosition(nSavedPos); return; }
+
+	// Scan body-level (type, len, data) cells
+	long bodyPos = 0;
+	while (bodyPos < totalLen)
+	{
+		BYTE type;
+		if (!m_oBufferedStream.GetUCharWithResult(&type)) break;
+		long len = m_oBufferedStream.GetLong();
+		if (len < 0) break;
+		bodyPos += 5 + len;
+
+		if (type == c_oSerParType::sectPr)
+		{
+			double dPageWidthMm = 210.0; // A4 default
+			double dLeftMm = 25.4, dRightMm = 25.4; // 1-inch defaults
+
+			// Scan sectPr cells for pgSz and pgMar
+			long sectPos = 0;
+			while (sectPos < len)
+			{
+				BYTE sType;
+				if (!m_oBufferedStream.GetUCharWithResult(&sType)) goto done;
+				long sLen = m_oBufferedStream.GetLong();
+				if (sLen < 0) goto done;
+				sectPos += 5 + sLen;
+
+				if (sType == c_oSerProp_secPrType::pgSz)
+				{
+					long szPos = 0;
+					while (szPos < sLen)
+					{
+						BYTE szType;
+						if (!m_oBufferedStream.GetUCharWithResult(&szType)) goto done;
+						long szLen = m_oBufferedStream.GetLong();
+						if (szLen < 0) goto done;
+						szPos += 5 + szLen;
+
+						if (szType == c_oSer_pgSzType::W)
+							dPageWidthMm = m_oBufferedStream.GetDouble();        // mm (8 bytes)
+						else if (szType == c_oSer_pgSzType::WTwips)
+							dPageWidthMm = m_oBufferedStream.GetLong() * 25.4 / 1440.0; // twips→mm (4 bytes)
+						else
+							m_oBufferedStream.GetPointer(szLen);                 // skip
+					}
+				}
+				else if (sType == c_oSerProp_secPrType::pgMar)
+				{
+					long mrPos = 0;
+					while (mrPos < sLen)
+					{
+						BYTE mrType;
+						if (!m_oBufferedStream.GetUCharWithResult(&mrType)) goto done;
+						long mrLen = m_oBufferedStream.GetLong();
+						if (mrLen < 0) goto done;
+						mrPos += 5 + mrLen;
+
+						if (mrType == c_oSer_pgMarType::Left)
+							dLeftMm  = m_oBufferedStream.GetDouble();
+						else if (mrType == c_oSer_pgMarType::LeftTwips)
+							dLeftMm  = m_oBufferedStream.GetLong() * 25.4 / 1440.0;
+						else if (mrType == c_oSer_pgMarType::Right)
+							dRightMm = m_oBufferedStream.GetDouble();
+						else if (mrType == c_oSer_pgMarType::RightTwips)
+							dRightMm = m_oBufferedStream.GetLong() * 25.4 / 1440.0;
+						else
+							m_oBufferedStream.GetPointer(mrLen);
+					}
+				}
+				else
+				{
+					m_oBufferedStream.GetPointer(sLen); // skip unknown sectPr child
+				}
+			}
+
+			// Update page text width from real page setup
+			double dTextWidthMm = dPageWidthMm - dLeftMm - dRightMm;
+			if (dTextWidthMm > 10.0)
+				m_dPageTextWidthPt = dTextWidthMm * 72.0 / 25.4;
+			break; // done — only one body-level sectPr needed
+		}
+		else
+		{
+			m_oBufferedStream.GetPointer(len); // skip non-sectPr body element
+		}
+	}
+done:
+	m_oBufferedStream.SetPosition(nSavedPos); // restore for normal READ_TABLE_DEF pass
+}
+
 int Binary_DocumentTableReader::Read()
 {
+	PreScanForPageDimensions(); // extract page dimensions BEFORE processing paragraphs
 	int res = c_oSerConstants::ReadOk;
 	READ_TABLE_DEF(res, this->ReadDocumentContent, NULL);
 	return res;
@@ -5456,6 +5583,12 @@ int Binary_DocumentTableReader::ReadParagraph(BYTE type, long length, void* poRe
 		m_bIsThaiDistribute = m_oCur_pPr.m_oJc.IsInit() &&
 		                      m_oCur_pPr.m_oJc->m_oVal.IsInit() &&
 		                      (m_oCur_pPr.m_oJc->m_oVal->GetValue() == SimpleTypes::jcThaiDistribute);
+		if (m_bIsThaiDistribute)
+		{
+			// Reset cross-run line-break state for the new paragraph
+			m_dThaiAccumWidthPt = 0.0;
+			m_bThaiFirstLineDone = false;
+		}
 
 		// Capture page dimensions from sectPr (appears in last paragraph of each section)
 		if (m_oCur_pPr.m_oSectPr.IsInit())
@@ -8643,7 +8776,16 @@ int Binary_DocumentTableReader::ReadRunContent(BYTE type, long length, void* poR
 	}
 	else if (c_oSerRunType::linebreak == type)
 	{
-		GetCurrentStringWriter().WriteString(std::wstring(_T("<w:br/>")));
+		if (m_bIsThaiDistribute)
+		{
+			// Skip JS-injected line-break bytes in thaiDistribute paragraphs.
+			// C++ recomputes all break positions via WriteThaiDistributeRunText
+			// using font metrics + cross-run width accumulation.
+		}
+		else
+		{
+			GetCurrentStringWriter().WriteString(std::wstring(_T("<w:br/>")));
+		}
 	}
 	else if (c_oSerRunType::linebreakClearAll == type)
 	{
