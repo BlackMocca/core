@@ -5012,19 +5012,33 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		dFontSizePt = 12.0; // OOXML spec default
 
 	// --- Paragraph indent: reduce effective line width ---
-	// w:ind m_oStart (left) + m_oEnd (right) are CSignedTwipsMeasure → ToMm() → points
-	double dEffectiveWidthPt = m_dPageTextWidthPt;
+	// w:ind: m_oStart (left), m_oEnd (right), m_oFirstLine (extra first-line indent),
+	//        m_oHanging (first-line negative / outdent — subtracted from start on line 1)
+	// All are CSignedTwipsMeasure → ToMm() → points.
+	// Body width (lines 2+): page_text_width - start - end
+	// First line width:       body_width - firstLine  (or + hanging)
+	double dBodyWidthPt  = m_dPageTextWidthPt; // lines 2+
+	double dFirstLineExtraPt = 0.0;            // extra indent on line 1 (positive shrinks)
 	if (m_oCur_pPr.m_oInd.IsInit())
 	{
 		const ComplexTypes::Word::CInd& oInd = *m_oCur_pPr.m_oInd;
 		if (oInd.m_oStart.IsInit())
-			dEffectiveWidthPt -= oInd.m_oStart->ToMm() * 72.0 / 25.4;
+			dBodyWidthPt -= oInd.m_oStart->ToMm() * 72.0 / 25.4;
 		if (oInd.m_oEnd.IsInit())
-			dEffectiveWidthPt -= oInd.m_oEnd->ToMm() * 72.0 / 25.4;
-		// firstLine indent only affects first line — not modelled here (conservative: ignore)
-		if (dEffectiveWidthPt < 36.0) // sanity: minimum 0.5 inch
-			dEffectiveWidthPt = 36.0;
+			dBodyWidthPt -= oInd.m_oEnd->ToMm() * 72.0 / 25.4;
+		// firstLine > 0: first line is indented further in → narrower
+		if (oInd.m_oFirstLine.IsInit())
+			dFirstLineExtraPt = oInd.m_oFirstLine->ToMm() * 72.0 / 25.4;
+		// hanging > 0: first line hangs left → wider (negative extra)
+		if (oInd.m_oHanging.IsInit())
+			dFirstLineExtraPt = -oInd.m_oHanging->ToMm() * 72.0 / 25.4;
+		if (dBodyWidthPt < 36.0) // sanity: minimum 0.5 inch
+			dBodyWidthPt = 36.0;
 	}
+	// Width for the current line (starts as first-line, switches to body after first break)
+	double dEffectiveWidthPt = dBodyWidthPt - dFirstLineExtraPt;
+	if (dEffectiveWidthPt < 36.0)
+		dEffectiveWidthPt = 36.0;
 
 	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
 	NSFonts::IFontManager* pFontMgr = m_oFontTableWriter.GetFontManager();
@@ -5080,6 +5094,8 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 						sAccum.clear();
 					}
 					flushAndBreak();
+					// After the first break, subsequent lines use body width (no firstLine indent)
+					dEffectiveWidthPt = dBodyWidthPt;
 					dAccumWidthPt = dSegWidthPt;
 					sAccum += seg;
 					continue;
