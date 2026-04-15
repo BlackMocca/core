@@ -4858,18 +4858,35 @@ ThaiWordBreaker& Binary_DocumentTableReader::GetThaiBreaker()
 	static std::once_flag s_initFlag;
 	std::call_once(s_initFlag, []() {
 		s_pSharedThaiBreaker = new ThaiWordBreaker();
-		// Try standard install path (matches Dockerfile COPY destination),
-		// then fall back to common alternatives.
+		// Try several known install paths for the Thai dictionary.
+		// The Dockerfile copies it to: /var/www/onlyoffice/documentserver/dictionary/words_th.txt
 		static const char* kDictPaths[] = {
+			// Primary: Dockerfile COPY destination
 			"/var/www/onlyoffice/documentserver/dictionary/words_th.txt",
+			// Secondary: next to x2t binary (set by Dockerfile as well)
+			"/var/www/onlyoffice/documentserver/server/FileConverter/bin/dictionary/words_th.txt",
+			// Other common install variants
+			"/var/lib/onlyoffice/documentserver/dictionary/words_th.txt",
 			"/etc/onlyoffice/documentserver/dictionary/words_th.txt",
+			"/opt/onlyoffice/documentserver/dictionary/words_th.txt",
 			nullptr
 		};
+		bool loaded = false;
 		for (int i = 0; kDictPaths[i] != nullptr; ++i)
 		{
 			if (s_pSharedThaiBreaker->Init(kDictPaths[i]))
+			{
+				loaded = true;
+				fprintf(stderr, "[ThaiWordBreaker] Dictionary loaded from: %s\n", kDictPaths[i]);
 				break;
+			}
+			else
+			{
+				fprintf(stderr, "[ThaiWordBreaker] Not found at: %s\n", kDictPaths[i]);
+			}
 		}
+		if (!loaded)
+			fprintf(stderr, "[ThaiWordBreaker] WARNING: Dictionary not found — Thai word breaks disabled\n");
 	});
 	return *s_pSharedThaiBreaker;
 }
