@@ -4890,11 +4890,24 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	if (words.empty())
 		return;
 
-	// Emit first word/segment as <w:t>
-	// Between each Thai word boundary emit </w:t><w:br/><w:t xml:space="preserve">
-	// Non-Thai segments and single unmatched Thai chars are also emitted without a break.
-	// A break is only inserted BETWEEN two segments where the PREVIOUS segment ends with
-	// a Thai character (= a real word boundary).
+	// Cache the rPr XML once so we can re-emit it for each new <w:r> we open.
+	// The outer caller already wrote <w:r>[rPr] before entering ReadRunContent, so
+	// we must close that run and open new ones around each <w:br/>.
+	std::wstring sRprXml;
+	if (m_oCur_rPr.IsNoEmpty())
+		sRprXml = m_oCur_rPr.toXML();
+
+	// A break is inserted BETWEEN two segments only when the previous segment ends
+	// with a Thai character AND the current segment starts with Thai.
+	// This avoids inserting <w:br/> between the last Thai word and following
+	// non-Thai text (e.g., "ทำงาน World").
+	//
+	// OOXML requires <w:br/> to live in its own <w:r> element (separate from <w:t>).
+	// The outer caller wrote: <w:r>[rPr] before us.
+	// When we need to break, we emit:
+	//   <w:t>accumulated</w:t></w:r>   ← close current run
+	//   <w:r>[rPr]<w:br/></w:r>        ← dedicated break run
+	//   <w:r>[rPr]                      ← start of next text run (outer </w:r> closes it)
 
 	std::wstring sAccum;
 	for (size_t i = 0; i < words.size(); ++i)
@@ -4903,31 +4916,33 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 
 		if (i > 0)
 		{
-			// Insert a word-break before this segment only when BOTH the previous
-			// segment ended with Thai AND the current segment starts with Thai.
-			// This avoids inserting <w:br/> between the last Thai word and
-			// following non-Thai text (e.g., "ทำงาน World").
 			const std::wstring& prev = words[i - 1];
 			bool prevEndsWithThai = !prev.empty() && ThaiWordBreaker::IsThai(prev.back());
 			bool curStartsWithThai = !seg.empty() && ThaiWordBreaker::IsThai(seg.front());
 
 			if (prevEndsWithThai && curStartsWithThai)
 			{
-				// Flush accumulated text, emit <w:br/>, start fresh
+				// 1. Close accumulated text in the current run
 				if (!sAccum.empty())
 				{
 					std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
 					GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
 					sAccum.clear();
 				}
-				GetCurrentStringWriter().WriteString(std::wstring(L"<w:br/>"));
+				// 2. Close current run, emit dedicated break run, open next run
+				GetCurrentStringWriter().WriteString(L"</w:r><w:r>");
+				if (!sRprXml.empty())
+					GetCurrentStringWriter().WriteString(sRprXml);
+				GetCurrentStringWriter().WriteString(L"<w:br/></w:r><w:r>");
+				if (!sRprXml.empty())
+					GetCurrentStringWriter().WriteString(sRprXml);
 			}
 		}
 
 		sAccum += seg;
 	}
 
-	// Flush remaining text
+	// Flush remaining text (outer caller will write the closing </w:r>)
 	if (!sAccum.empty())
 	{
 		std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
