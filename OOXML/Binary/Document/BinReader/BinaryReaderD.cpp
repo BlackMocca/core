@@ -3345,12 +3345,13 @@ int BinaryStyleTableReader::ReadStyleTableContent(BYTE type, long length, void* 
 	}
 	else if (c_oSer_st::DefrPr == type)
 	{
-		OOX::Logic::CRunProperty runPr;		
+		OOX::Logic::CRunProperty runPr;
 		res = oBinary_rPrReader.Read(length, &runPr);
 
 		if (runPr.IsNoEmpty())
 		{
 			m_oStylesWriter.m_rPrDefault.WriteString(runPr.toXML());
+			m_oStylesWriter.m_oDocDefaultRPr = runPr; // store parsed for font-metrics fallback
 		}
 	}
 	else
@@ -3448,6 +3449,9 @@ int BinaryStyleTableReader::ReadStyleContent(BYTE type, long length, void* poRes
 		if (newRPr.IsNoEmpty())
 		{
 			odocStyle->TextPr = newRPr.toXML();
+			// Store parsed rPr keyed by style ID for font-metrics lookup
+			if (!odocStyle->Id.empty())
+				m_oStylesWriter.m_mapStyleRPr[odocStyle->Id] = newRPr;
 		}
 	}
 	else if (c_oSer_sts::Style_ParaPr == type)
@@ -4957,25 +4961,70 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	if (m_oCur_rPr.IsNoEmpty())
 		sRprXml = m_oCur_rPr.toXML();
 
-	// --- Font metrics: resolve font name and size from current run properties ---
-	std::wstring sFontName = L"TH SarabunPSK"; // fallback
-	double dFontSizePt = 16.0;                 // fallback (16pt)
+	// --- Font metrics: resolve font name and size ---
+	// Priority: run rPr → document default rPr (docDefaults) → empty string / 0 (IFontManager
+	// will try its own fallback if the name is unknown).
+	const Writers::StylesWriter& oStylesWriter = m_oFileWriter.get_style_writers();
+	const OOX::Logic::CRunProperty& oDefRPr   = oStylesWriter.m_oDocDefaultRPr;
 
-	if (m_oCur_rPr.m_oRFonts.IsInit())
+	// Paragraph style rPr (w:pStyle value stored in m_oCur_pPr.m_oStyle)
+	const OOX::Logic::CRunProperty* pStyleRPr = nullptr;
+	if (m_oCur_pPr.m_oPStyle.IsInit() && m_oCur_pPr.m_oPStyle->m_sVal.IsInit())
 	{
-		// Thai characters use CS (complex script) or EastAsia font slot
-		if (m_oCur_rPr.m_oRFonts->m_sCs.IsInit() && !m_oCur_rPr.m_oRFonts->m_sCs->empty())
-			sFontName = *m_oCur_rPr.m_oRFonts->m_sCs;
-		else if (m_oCur_rPr.m_oRFonts->m_sEastAsia.IsInit() && !m_oCur_rPr.m_oRFonts->m_sEastAsia->empty())
-			sFontName = *m_oCur_rPr.m_oRFonts->m_sEastAsia;
-		else if (m_oCur_rPr.m_oRFonts->m_sAscii.IsInit() && !m_oCur_rPr.m_oRFonts->m_sAscii->empty())
-			sFontName = *m_oCur_rPr.m_oRFonts->m_sAscii;
+		const std::wstring& sStyleId = *m_oCur_pPr.m_oPStyle->m_sVal;
+		auto it = oStylesWriter.m_mapStyleRPr.find(sStyleId);
+		if (it != oStylesWriter.m_mapStyleRPr.end())
+			pStyleRPr = &it->second;
 	}
-	// m_oSz stores half-points (hps); ToPoints() converts to pt
-	if (m_oCur_rPr.m_oSz.IsInit() && m_oCur_rPr.m_oSz->m_oVal.IsInit())
-		dFontSizePt = m_oCur_rPr.m_oSz->m_oVal->ToPoints();
-	else if (m_oCur_rPr.m_oSzCs.IsInit() && m_oCur_rPr.m_oSzCs->m_oVal.IsInit())
-		dFontSizePt = m_oCur_rPr.m_oSzCs->m_oVal->ToPoints();
+
+	auto resolveFont = [](const OOX::Logic::CRunProperty& rPr) -> std::wstring {
+		if (rPr.m_oRFonts.IsInit()) {
+			if (rPr.m_oRFonts->m_sCs.IsInit()       && !rPr.m_oRFonts->m_sCs->empty())
+				return *rPr.m_oRFonts->m_sCs;
+			if (rPr.m_oRFonts->m_sEastAsia.IsInit() && !rPr.m_oRFonts->m_sEastAsia->empty())
+				return *rPr.m_oRFonts->m_sEastAsia;
+			if (rPr.m_oRFonts->m_sAscii.IsInit()    && !rPr.m_oRFonts->m_sAscii->empty())
+				return *rPr.m_oRFonts->m_sAscii;
+		}
+		return L"";
+	};
+	auto resolveSize = [](const OOX::Logic::CRunProperty& rPr) -> double {
+		if (rPr.m_oSzCs.IsInit() && rPr.m_oSzCs->m_oVal.IsInit())
+			return rPr.m_oSzCs->m_oVal->ToPoints();
+		if (rPr.m_oSz.IsInit()   && rPr.m_oSz->m_oVal.IsInit())
+			return rPr.m_oSz->m_oVal->ToPoints();
+		return 0.0;
+	};
+
+	// Resolve: run rPr → paragraph style rPr → docDefaults rPr
+	std::wstring sFontName = resolveFont(m_oCur_rPr);
+	if (sFontName.empty() && pStyleRPr)
+		sFontName = resolveFont(*pStyleRPr);
+	if (sFontName.empty())
+		sFontName = resolveFont(oDefRPr);
+
+	double dFontSizePt = resolveSize(m_oCur_rPr);
+	if (dFontSizePt <= 0.0 && pStyleRPr)
+		dFontSizePt = resolveSize(*pStyleRPr);
+	if (dFontSizePt <= 0.0)
+		dFontSizePt = resolveSize(oDefRPr);
+	if (dFontSizePt <= 0.0)
+		dFontSizePt = 12.0; // OOXML spec default
+
+	// --- Paragraph indent: reduce effective line width ---
+	// w:ind m_oStart (left) + m_oEnd (right) are CSignedTwipsMeasure → ToMm() → points
+	double dEffectiveWidthPt = m_dPageTextWidthPt;
+	if (m_oCur_pPr.m_oInd.IsInit())
+	{
+		const ComplexTypes::Word::CInd& oInd = *m_oCur_pPr.m_oInd;
+		if (oInd.m_oStart.IsInit())
+			dEffectiveWidthPt -= oInd.m_oStart->ToMm() * 72.0 / 25.4;
+		if (oInd.m_oEnd.IsInit())
+			dEffectiveWidthPt -= oInd.m_oEnd->ToMm() * 72.0 / 25.4;
+		// firstLine indent only affects first line — not modelled here (conservative: ignore)
+		if (dEffectiveWidthPt < 36.0) // sanity: minimum 0.5 inch
+			dEffectiveWidthPt = 36.0;
+	}
 
 	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
 	NSFonts::IFontManager* pFontMgr = m_oFontTableWriter.GetFontManager();
@@ -5021,7 +5070,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 				    ? MeasureWordWidthPt(pFontMgr, seg)
 				    : 0.0;
 
-				if (bHasFontMetrics && (dAccumWidthPt + dSegWidthPt > m_dPageTextWidthPt))
+				if (bHasFontMetrics && (dAccumWidthPt + dSegWidthPt > dEffectiveWidthPt))
 				{
 					// Flush accumulated text before break
 					if (!sAccum.empty())

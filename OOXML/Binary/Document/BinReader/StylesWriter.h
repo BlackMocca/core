@@ -32,6 +32,8 @@
 #pragma once
 
 #include "../../Sheets/Common/Common.h"
+#include "../../../DocxFormat/Logic/RunProperty.h"
+#include <map>
 
 namespace Writers
 {
@@ -50,6 +52,8 @@ namespace Writers
 		NSStringUtils::CStringBuilder	m_rPrDefault;
 		NSStringUtils::CStringBuilder	m_pPrDefault;
 		int								m_nVersion;
+		OOX::Logic::CRunProperty		m_oDocDefaultRPr; // parsed default rPr (docDefaults)
+		std::map<std::wstring, OOX::Logic::CRunProperty> m_mapStyleRPr; // styleId → parsed rPr
 
 		StylesWriter(std::wstring sDir, int nVersion);
 
