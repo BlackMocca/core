@@ -34,6 +34,7 @@
 #include "FileWriter.h"
 #include "ReaderClasses.h"
 #include "ThaiWordBreaker.h"
+#include "../../../../DesktopEditor/graphics/pro/Fonts.h"
 
 #include "../../../../DesktopEditor/common/StringBuilder.h"
 
@@ -301,6 +302,7 @@ private:
 	// Thai Distributed support
 	bool                            m_bIsThaiDistribute;
 	static ThaiWordBreaker*         s_pSharedThaiBreaker; // lazy-init shared instance
+	double                          m_dPageTextWidthPt;   // page text width in points (updated from sectPr)
 public:
     Writers::ContentWriter&         m_oDocumentWriter;
     Writers::MediaWriter&           m_oMediaWriter;
@@ -500,6 +502,8 @@ public:
 	// Thai Distributed helper
 	void WriteThaiDistributeRunText(const std::wstring& sText);
 	ThaiWordBreaker& GetThaiBreaker();
+	void UpdatePageSizeFromSectPr(const OOX::Logic::CSectionProperty& oSectPr);
+	double MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr, const std::wstring& sWord) const;
 };
 class Binary_NotesTableReader : public Binary_CommonReader
 {

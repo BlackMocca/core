@@ -4845,9 +4845,54 @@ Binary_DocumentTableReader::Binary_DocumentTableReader(NSBinPptxRW::CBinaryFileR
 	m_byteLastElemType = c_oSerParType::Content;
 	m_pCurWriter = NULL;
 	m_bIsThaiDistribute = false;
+	// Default: A4 (210mm) minus standard margins (25.4mm each side) = 159.2mm → ~453pt
+	m_dPageTextWidthPt = 159.2 * 72.0 / 25.4;
 }
 Binary_DocumentTableReader::~Binary_DocumentTableReader()
 {
+}
+
+// Update page text width from section properties (called when sectPr is parsed).
+void Binary_DocumentTableReader::UpdatePageSizeFromSectPr(const OOX::Logic::CSectionProperty& oSectPr)
+{
+	// Page width in mm
+	double dPageWidthMm = 210.0; // A4 default
+	if (oSectPr.m_oPgSz.IsInit() && oSectPr.m_oPgSz->m_oW.IsInit())
+		dPageWidthMm = oSectPr.m_oPgSz->m_oW->ToMm();
+
+	// Left + right margins in mm
+	double dLeftMm = 25.4, dRightMm = 25.4; // default 1 inch each
+	if (oSectPr.m_oPgMar.IsInit())
+	{
+		if (oSectPr.m_oPgMar->m_oLeft.IsInit())
+			dLeftMm = oSectPr.m_oPgMar->m_oLeft->ToMm();
+		if (oSectPr.m_oPgMar->m_oRight.IsInit())
+			dRightMm = oSectPr.m_oPgMar->m_oRight->ToMm();
+	}
+
+	double dTextWidthMm = dPageWidthMm - dLeftMm - dRightMm;
+	if (dTextWidthMm > 10.0) // sanity check
+	{
+		m_dPageTextWidthPt = dTextWidthMm * 72.0 / 25.4;
+		fprintf(stderr, "[ThaiDistribute] Page text width: %.1fmm (%.1fpt)\n",
+		        dTextWidthMm, m_dPageTextWidthPt);
+	}
+}
+
+// Measure the advance width (in points) of a string using the given IFontManager.
+// The font must already be loaded via LoadFontByName before calling this.
+double Binary_DocumentTableReader::MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr,
+                                                       const std::wstring& sWord) const
+{
+	if (!pFontMgr || sWord.empty())
+		return 0.0;
+	double dWidth = 0.0;
+	for (wchar_t c : sWord)
+	{
+		TBBoxAdvance adv = pFontMgr->MeasureChar2(static_cast<LONG>(c));
+		dWidth += static_cast<double>(adv.fAdvanceX);
+	}
+	return dWidth;
 }
 
 // Static shared instance for the Thai word breaker (lazy-initialised once).
@@ -4897,7 +4942,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 
 	if (!breaker.IsLoaded())
 	{
-		// No dictionary: write text as-is, no word breaks
+		// No dictionary: write text as-is (renderer handles thaiDistribute layout)
 		std::wstring sEncoded = XmlUtils::EncodeXmlString(sText);
 		GetCurrentStringWriter().WriteString(std::wstring(L"<w:t xml:space=\"preserve\">") + sEncoded + L"</w:t>");
 		return;
@@ -4907,30 +4952,63 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	if (words.empty())
 		return;
 
-	// Cache the rPr XML once so we can re-emit it for each new <w:r> we open.
-	// The outer caller already wrote <w:r>[rPr] before entering ReadRunContent, so
-	// we must close that run and open new ones around each <w:br/>.
+	// rPr XML cached for re-emitting in each new <w:r> we open.
 	std::wstring sRprXml;
 	if (m_oCur_rPr.IsNoEmpty())
 		sRprXml = m_oCur_rPr.toXML();
 
-	// A break is inserted BETWEEN two segments only when the previous segment ends
-	// with a Thai character AND the current segment starts with Thai.
-	// This avoids inserting <w:br/> between the last Thai word and following
-	// non-Thai text (e.g., "ทำงาน World").
-	//
-	// OOXML requires <w:br/> to live in its own <w:r> element (separate from <w:t>).
-	// The outer caller wrote: <w:r>[rPr] before us.
-	// When we need to break, we emit:
-	//   <w:t>accumulated</w:t></w:r>   ← close current run
-	//   <w:r>[rPr]<w:br/></w:r>        ← dedicated break run
-	//   <w:r>[rPr]                      ← start of next text run (outer </w:r> closes it)
+	// --- Font metrics: resolve font name and size from current run properties ---
+	std::wstring sFontName = L"TH SarabunPSK"; // fallback
+	double dFontSizePt = 16.0;                 // fallback (16pt)
+
+	if (m_oCur_rPr.m_oRFonts.IsInit())
+	{
+		// Thai characters use CS (complex script) or EastAsia font slot
+		if (m_oCur_rPr.m_oRFonts->m_sCs.IsInit() && !m_oCur_rPr.m_oRFonts->m_sCs->empty())
+			sFontName = *m_oCur_rPr.m_oRFonts->m_sCs;
+		else if (m_oCur_rPr.m_oRFonts->m_sEastAsia.IsInit() && !m_oCur_rPr.m_oRFonts->m_sEastAsia->empty())
+			sFontName = *m_oCur_rPr.m_oRFonts->m_sEastAsia;
+		else if (m_oCur_rPr.m_oRFonts->m_sAscii.IsInit() && !m_oCur_rPr.m_oRFonts->m_sAscii->empty())
+			sFontName = *m_oCur_rPr.m_oRFonts->m_sAscii;
+	}
+	// m_oSz stores half-points (hps); ToPoints() converts to pt
+	if (m_oCur_rPr.m_oSz.IsInit() && m_oCur_rPr.m_oSz->m_oVal.IsInit())
+		dFontSizePt = m_oCur_rPr.m_oSz->m_oVal->ToPoints();
+	else if (m_oCur_rPr.m_oSzCs.IsInit() && m_oCur_rPr.m_oSzCs->m_oVal.IsInit())
+		dFontSizePt = m_oCur_rPr.m_oSzCs->m_oVal->ToPoints();
+
+	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
+	NSFonts::IFontManager* pFontMgr = m_oFontTableWriter.GetFontManager();
+	bool bHasFontMetrics = false;
+	if (pFontMgr)
+	{
+		int nLoadResult = pFontMgr->LoadFontByName(sFontName, dFontSizePt, 0, 72.0, 72.0);
+		if (nLoadResult)
+		{
+			pFontMgr->AfterLoad();
+			bHasFontMetrics = true;
+		}
+	}
+
+	auto flushAndBreak = [&]()
+	{
+		// Close current run, emit dedicated <w:br/> run, open next run
+		GetCurrentStringWriter().WriteString(L"</w:r><w:r>");
+		if (!sRprXml.empty())
+			GetCurrentStringWriter().WriteString(sRprXml);
+		GetCurrentStringWriter().WriteString(L"<w:br/></w:r><w:r>");
+		if (!sRprXml.empty())
+			GetCurrentStringWriter().WriteString(sRprXml);
+	};
 
 	std::wstring sAccum;
+	double dAccumWidthPt = 0.0; // accumulated line width in points
+
 	for (size_t i = 0; i < words.size(); ++i)
 	{
 		const std::wstring& seg = words[i];
 
+		// Only break at Thai↔Thai word boundary
 		if (i > 0)
 		{
 			const std::wstring& prev = words[i - 1];
@@ -4939,27 +5017,42 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 
 			if (prevEndsWithThai && curStartsWithThai)
 			{
-				// 1. Close accumulated text in the current run
-				if (!sAccum.empty())
+				double dSegWidthPt = bHasFontMetrics
+				    ? MeasureWordWidthPt(pFontMgr, seg)
+				    : 0.0;
+
+				if (bHasFontMetrics && (dAccumWidthPt + dSegWidthPt > m_dPageTextWidthPt))
 				{
-					std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
-					GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
-					sAccum.clear();
+					// Flush accumulated text before break
+					if (!sAccum.empty())
+					{
+						std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
+						GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
+						sAccum.clear();
+					}
+					flushAndBreak();
+					dAccumWidthPt = dSegWidthPt;
+					sAccum += seg;
+					continue;
 				}
-				// 2. Close current run, emit dedicated break run, open next run
-				GetCurrentStringWriter().WriteString(L"</w:r><w:r>");
-				if (!sRprXml.empty())
-					GetCurrentStringWriter().WriteString(sRprXml);
-				GetCurrentStringWriter().WriteString(L"<w:br/></w:r><w:r>");
-				if (!sRprXml.empty())
-					GetCurrentStringWriter().WriteString(sRprXml);
+				// No break: advance width accumulates
+				if (bHasFontMetrics)
+					dAccumWidthPt += dSegWidthPt;
 			}
+			else if (bHasFontMetrics)
+			{
+				dAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
+			}
+		}
+		else if (bHasFontMetrics)
+		{
+			dAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
 		}
 
 		sAccum += seg;
 	}
 
-	// Flush remaining text (outer caller will write the closing </w:r>)
+	// Flush remaining text (outer caller writes the closing </w:r>)
 	if (!sAccum.empty())
 	{
 		std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
@@ -5298,6 +5391,10 @@ int Binary_DocumentTableReader::ReadParagraph(BYTE type, long length, void* poRe
 		m_bIsThaiDistribute = m_oCur_pPr.m_oJc.IsInit() &&
 		                      m_oCur_pPr.m_oJc->m_oVal.IsInit() &&
 		                      (m_oCur_pPr.m_oJc->m_oVal->GetValue() == SimpleTypes::jcThaiDistribute);
+
+		// Capture page dimensions from sectPr (appears in last paragraph of each section)
+		if (m_oCur_pPr.m_oSectPr.IsInit())
+			UpdatePageSizeFromSectPr(*m_oCur_pPr.m_oSectPr);
 	}
 	else if ( c_oSerParType::Content == type )
 	{

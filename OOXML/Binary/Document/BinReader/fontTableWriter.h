@@ -55,6 +55,8 @@ namespace Writers
 
 		void Write(bool bGlossary = false);
 		void WriteFont(std::wstring sFontName);
+
+		NSFonts::IFontManager* GetFontManager() const { return m_pFontManager; }
 	};
 }
 
