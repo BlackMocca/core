@@ -5109,12 +5109,18 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 
 				if (bHasFontMetrics && (m_dThaiAccumWidthPt + dSegWidthPt > getEffectiveWidth()))
 				{
-					// Flush accumulated text before break
+					// Flush accumulated text before break, trimming trailing spaces
+					// (trailing spaces at end of line cause false overflow in the next run)
 					if (!sAccum.empty())
 					{
-						std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
-						GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
-						sAccum.clear();
+						while (!sAccum.empty() && sAccum.back() == L' ')
+							sAccum.pop_back();
+						if (!sAccum.empty())
+						{
+							std::wstring sEnc = XmlUtils::EncodeXmlString(sAccum);
+							GetCurrentStringWriter().WriteString(L"<w:t xml:space=\"preserve\">" + sEnc + L"</w:t>");
+							sAccum.clear();
+						}
 					}
 					flushAndBreak();
 					m_dThaiAccumWidthPt = dSegWidthPt; // new line starts with this word
@@ -5136,6 +5142,23 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		}
 
 		sAccum += seg;
+	}
+
+	// Subtract trailing-space widths from the accumulator so they don't cause a false
+	// overflow check in the next run (spaces at end of a run are not "printable" width).
+	if (bHasFontMetrics && !sAccum.empty())
+	{
+		size_t nTrail = 0;
+		for (size_t j = sAccum.size(); j > 0 && sAccum[j - 1] == L' '; --j)
+			++nTrail;
+		if (nTrail > 0)
+		{
+			std::wstring sSpaces(nTrail, L' ');
+			double dSpaceWidth = MeasureWordWidthPt(pFontMgr, sSpaces);
+			m_dThaiAccumWidthPt -= dSpaceWidth;
+			if (m_dThaiAccumWidthPt < 0.0)
+				m_dThaiAccumWidthPt = 0.0;
+		}
 	}
 
 	// Flush remaining text (outer caller writes the closing </w:r>)
