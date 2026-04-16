@@ -5153,16 +5153,36 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 // Uses GetPosition/SetPosition to restore the stream after scanning.
 // Does NOT call Read_SecPr (avoids double-writing to m_oSecPr); instead reads
 // pgSz/pgMar cells inline using the same type codes as Binary_pPrReader.
+// Helper: resolve a READ2_DEF lenType byte → actual byte count.
+// Returns -1 for Variable (caller must GetLong()), -2 for unknown.
+static int Read2DefLenTypeToBytes(BYTE lenType)
+{
+	switch (lenType)
+	{
+	case c_oSerPropLenType::Null:     return 0;
+	case c_oSerPropLenType::Byte:     return 1;
+	case c_oSerPropLenType::Short:    return 2;
+	case c_oSerPropLenType::Three:    return 3;
+	case c_oSerPropLenType::Long:
+	case c_oSerPropLenType::Double:   return 4;
+	case c_oSerPropLenType::Variable: return -1; // caller reads extra GetLong()
+	case c_oSerPropLenType::Double64:
+	case c_oSerPropLenType::Long64:   return 8;
+	default:                          return -2; // unknown — abort scan
+	}
+}
+
 void Binary_DocumentTableReader::PreScanForPageDimensions()
 {
 	if (!m_oBufferedStream.Peek(4)) return;
 	LONG nSavedPos = m_oBufferedStream.GetPos();
 
-	// READ_TABLE_DEF format: (totalLen: 4 bytes)(cells: READ1_DEF format)
+	// Body binary layout (READ_TABLE_DEF / READ1_DEF format):
+	//   (totalLen: 4 bytes)(cells: (type:1)(len:4)(data:len) …)
 	long totalLen = m_oBufferedStream.GetLong();
 	if (totalLen <= 0) { m_oBufferedStream.Seek(nSavedPos); return; }
 
-	// Scan body-level (type, len, data) cells
+	// Scan body-level READ1_DEF cells looking for c_oSerParType::sectPr.
 	long bodyPos = 0;
 	while (bodyPos < totalLen)
 	{
@@ -5174,10 +5194,10 @@ void Binary_DocumentTableReader::PreScanForPageDimensions()
 
 		if (type == c_oSerParType::sectPr)
 		{
-			double dPageWidthMm = 210.0; // A4 default
+			double dPageWidthMm = 210.0;          // A4 default
 			double dLeftMm = 25.4, dRightMm = 25.4; // 1-inch defaults
 
-			// Scan sectPr cells for pgSz and pgMar
+			// sectPr children use READ1_DEF: (type:1)(len:4)(data:len)
 			long sectPos = 0;
 			while (sectPos < len)
 			{
@@ -5187,46 +5207,54 @@ void Binary_DocumentTableReader::PreScanForPageDimensions()
 				if (sLen < 0) goto done;
 				sectPos += 5 + sLen;
 
-				if (sType == c_oSerProp_secPrType::pgSz)
+				if (sType == c_oSerProp_secPrType::pgSz ||
+				    sType == c_oSerProp_secPrType::pgMar)
 				{
-					long szPos = 0;
-					while (szPos < sLen)
+					// pgSz / pgMar leaf cells use READ2_DEF format:
+					//   (type:1)(lenType:1)(data:N) — N from lenType
+					long leafPos = 0;
+					while (leafPos < sLen)
 					{
-						BYTE szType;
-						if (!m_oBufferedStream.GetUCharWithResult(&szType)) goto done;
-						long szLen = m_oBufferedStream.GetLong();
-						if (szLen < 0) goto done;
-						szPos += 5 + szLen;
+						BYTE lType;
+						if (!m_oBufferedStream.GetUCharWithResult(&lType)) goto done;
+						BYTE lLenTypeByte;
+						if (!m_oBufferedStream.GetUCharWithResult(&lLenTypeByte)) goto done;
 
-						if (szType == c_oSer_pgSzType::W)
-							dPageWidthMm = m_oBufferedStream.GetDouble();        // mm (8 bytes)
-						else if (szType == c_oSer_pgSzType::WTwips)
-							dPageWidthMm = m_oBufferedStream.GetLong() * 25.4 / 1440.0; // twips→mm (4 bytes)
-						else
-							m_oBufferedStream.GetPointer(szLen);                 // skip
-					}
-				}
-				else if (sType == c_oSerProp_secPrType::pgMar)
-				{
-					long mrPos = 0;
-					while (mrPos < sLen)
-					{
-						BYTE mrType;
-						if (!m_oBufferedStream.GetUCharWithResult(&mrType)) goto done;
-						long mrLen = m_oBufferedStream.GetLong();
-						if (mrLen < 0) goto done;
-						mrPos += 5 + mrLen;
+						int lRealLen = Read2DefLenTypeToBytes(lLenTypeByte);
+						int lOverhead = 2; // type + lenType bytes
+						if (lRealLen == -1)
+						{
+							// Variable: extra 4-byte length follows
+							lRealLen = m_oBufferedStream.GetLong();
+							lOverhead += 4;
+						}
+						else if (lRealLen == -2)
+						{
+							goto done; // unknown lenType — bail safely
+						}
+						leafPos += lOverhead + lRealLen;
 
-						if (mrType == c_oSer_pgMarType::Left)
-							dLeftMm  = m_oBufferedStream.GetDouble();
-						else if (mrType == c_oSer_pgMarType::LeftTwips)
-							dLeftMm  = m_oBufferedStream.GetLong() * 25.4 / 1440.0;
-						else if (mrType == c_oSer_pgMarType::Right)
-							dRightMm = m_oBufferedStream.GetDouble();
-						else if (mrType == c_oSer_pgMarType::RightTwips)
-							dRightMm = m_oBufferedStream.GetLong() * 25.4 / 1440.0;
+						// We only care about WTwips / LeftTwips / RightTwips (all Long=4 bytes)
+						if (lRealLen == 4)
+						{
+							long twips = m_oBufferedStream.GetLong();
+							double mm   = twips * 25.4 / 1440.0;
+							if (sType == c_oSerProp_secPrType::pgSz &&
+							    lType == c_oSer_pgSzType::WTwips)
+								dPageWidthMm = mm;
+							else if (sType == c_oSerProp_secPrType::pgMar &&
+							         lType == c_oSer_pgMarType::LeftTwips)
+								dLeftMm = mm;
+							else if (sType == c_oSerProp_secPrType::pgMar &&
+							         lType == c_oSer_pgMarType::RightTwips)
+								dRightMm = mm;
+							// else skip — value already read, nothing extra to do
+						}
 						else
-							m_oBufferedStream.GetPointer(mrLen);
+						{
+							if (m_oBufferedStream.GetPointer(lRealLen) == nullptr && lRealLen > 0)
+								goto done;
+						}
 					}
 				}
 				else
@@ -5235,11 +5263,10 @@ void Binary_DocumentTableReader::PreScanForPageDimensions()
 				}
 			}
 
-			// Update page text width from real page setup
 			double dTextWidthMm = dPageWidthMm - dLeftMm - dRightMm;
 			if (dTextWidthMm > 10.0)
 				m_dPageTextWidthPt = dTextWidthMm * 72.0 / 25.4;
-			break; // done — only one body-level sectPr needed
+			break; // found sectPr — done
 		}
 		else
 		{
@@ -5247,7 +5274,7 @@ void Binary_DocumentTableReader::PreScanForPageDimensions()
 		}
 	}
 done:
-	m_oBufferedStream.Seek(nSavedPos); // restore for normal READ_TABLE_DEF pass
+	m_oBufferedStream.Seek(nSavedPos); // restore stream for normal READ_TABLE_DEF pass
 }
 
 int Binary_DocumentTableReader::Read()
