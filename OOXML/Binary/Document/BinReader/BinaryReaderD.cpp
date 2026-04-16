@@ -5144,20 +5144,26 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		sAccum += seg;
 	}
 
-	// Subtract trailing-space widths from the accumulator so they don't cause a false
-	// overflow check in the next run (spaces at end of a run are not "printable" width).
-	if (bHasFontMetrics && !sAccum.empty())
+	// Trim trailing spaces from the end of the run before flushing:
+	// 1. Prevents the renderer from word-wrapping at the trailing space (visual bug)
+	// 2. Removes their width from the accumulator so the next run's overflow check
+	//    is not inflated by spaces that won't appear on the line.
+	if (!sAccum.empty())
 	{
 		size_t nTrail = 0;
 		for (size_t j = sAccum.size(); j > 0 && sAccum[j - 1] == L' '; --j)
 			++nTrail;
 		if (nTrail > 0)
 		{
-			std::wstring sSpaces(nTrail, L' ');
-			double dSpaceWidth = MeasureWordWidthPt(pFontMgr, sSpaces);
-			m_dThaiAccumWidthPt -= dSpaceWidth;
-			if (m_dThaiAccumWidthPt < 0.0)
-				m_dThaiAccumWidthPt = 0.0;
+			if (bHasFontMetrics)
+			{
+				std::wstring sSpaces(nTrail, L' ');
+				double dSpaceWidth = MeasureWordWidthPt(pFontMgr, sSpaces);
+				m_dThaiAccumWidthPt -= dSpaceWidth;
+				if (m_dThaiAccumWidthPt < 0.0)
+					m_dThaiAccumWidthPt = 0.0;
+			}
+			sAccum.resize(sAccum.size() - nTrail);
 		}
 	}
 
