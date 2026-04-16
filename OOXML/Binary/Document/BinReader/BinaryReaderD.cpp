@@ -5097,14 +5097,18 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	{
 		const std::wstring& seg = words[i];
 
-		// Only break at Thai↔Thai word boundary
+		// Break at Thai↔Thai or space→Thai word boundary.
+		// Space before a Thai word is a valid break point — without this, a space
+		// segment breaks the Thai↔Thai chain and "และ" (or any following Thai word)
+		// never reaches the overflow check even when the line is full.
 		if (i > 0)
 		{
 			const std::wstring& prev = words[i - 1];
-			bool prevEndsWithThai = !prev.empty() && ThaiWordBreaker::IsThai(prev.back());
+			bool prevIsBreakEnd  = !prev.empty() &&
+			    (ThaiWordBreaker::IsThai(prev.back()) || prev.back() == L' ');
 			bool curStartsWithThai = !seg.empty() && ThaiWordBreaker::IsThai(seg.front());
 
-			if (prevEndsWithThai && curStartsWithThai)
+			if (prevIsBreakEnd && curStartsWithThai)
 			{
 				double dSegWidthPt = bHasFontMetrics
 				    ? MeasureWordWidthPt(pFontMgr, seg)
