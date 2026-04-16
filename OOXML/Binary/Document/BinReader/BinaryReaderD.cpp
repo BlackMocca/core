@@ -5156,11 +5156,11 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 void Binary_DocumentTableReader::PreScanForPageDimensions()
 {
 	if (!m_oBufferedStream.Peek(4)) return;
-	_UINT32 nSavedPos = m_oBufferedStream.GetPosition();
+	LONG nSavedPos = m_oBufferedStream.GetPos();
 
 	// READ_TABLE_DEF format: (totalLen: 4 bytes)(cells: READ1_DEF format)
 	long totalLen = m_oBufferedStream.GetLong();
-	if (totalLen <= 0) { m_oBufferedStream.SetPosition(nSavedPos); return; }
+	if (totalLen <= 0) { m_oBufferedStream.Seek(nSavedPos); return; }
 
 	// Scan body-level (type, len, data) cells
 	long bodyPos = 0;
@@ -5247,7 +5247,7 @@ void Binary_DocumentTableReader::PreScanForPageDimensions()
 		}
 	}
 done:
-	m_oBufferedStream.SetPosition(nSavedPos); // restore for normal READ_TABLE_DEF pass
+	m_oBufferedStream.Seek(nSavedPos); // restore for normal READ_TABLE_DEF pass
 }
 
 int Binary_DocumentTableReader::Read()
