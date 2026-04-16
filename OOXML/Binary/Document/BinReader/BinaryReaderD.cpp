@@ -8805,9 +8805,21 @@ int Binary_DocumentTableReader::ReadRunContent(BYTE type, long length, void* poR
 	{
 		if (m_bIsThaiDistribute)
 		{
-			// Skip JS-injected line-break bytes in thaiDistribute paragraphs.
-			// C++ recomputes all break positions via WriteThaiDistributeRunText
-			// using font metrics + cross-run width accumulation.
+			// Pass through JS line-break and reset cross-run accumulator.
+			//
+			// Strategy:
+			//   ON-SCREEN paragraphs  (IsRecalculated=true):  JS injects correct <w:br/> at
+			//     word boundaries after computing the actual rendered line layout.  We trust
+			//     these positions and emit them verbatim.  Resetting m_dThaiAccumWidthPt
+			//     prevents the C++ overflow check from treating width accumulated on the
+			//     *previous* visual line as part of the *next* line.
+			//
+			//   OFF-SCREEN paragraphs (IsRecalculated=false): JS never injects any linebreak
+			//     bytes, so this branch is never reached.  All breaks are produced by the
+			//     overflow check inside WriteThaiDistributeRunText (C++ algorithm).
+			GetCurrentStringWriter().WriteString(std::wstring(L"<w:br/>"));
+			m_dThaiAccumWidthPt  = 0.0;
+			m_bThaiFirstLineDone = true;
 		}
 		else
 		{
