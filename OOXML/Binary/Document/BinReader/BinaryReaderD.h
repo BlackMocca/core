@@ -304,7 +304,8 @@ private:
 	static ThaiWordBreaker*         s_pSharedThaiBreaker; // lazy-init shared instance
 	double                          m_dPageTextWidthPt;   // page text width in points (updated from sectPr)
 	double                          m_dThaiAccumWidthPt;  // accumulated line width across runs in current para
-	bool                            m_bThaiFirstLineDone; // false = still on first line (firstLine indent applies)
+	bool                            m_bThaiFirstLineDone;    // false = still on first line (firstLine indent applies)
+	int                             m_nThaiPendingCppBreaks; // C++ breaks inserted but not yet matched to a JS break
 public:
     Writers::ContentWriter&         m_oDocumentWriter;
     Writers::MediaWriter&           m_oMediaWriter;

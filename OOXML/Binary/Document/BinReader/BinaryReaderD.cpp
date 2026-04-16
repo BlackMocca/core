@@ -4851,6 +4851,7 @@ Binary_DocumentTableReader::Binary_DocumentTableReader(NSBinPptxRW::CBinaryFileR
 	m_bIsThaiDistribute = false;
 	m_dThaiAccumWidthPt = 0.0;
 	m_bThaiFirstLineDone = false;
+	m_nThaiPendingCppBreaks = 0;
 	// Default: A4 (210mm) minus standard margins (25.4mm each side) = 159.2mm → ~453pt
 	m_dPageTextWidthPt = 159.2 * 72.0 / 25.4;
 }
@@ -5082,6 +5083,8 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 			GetCurrentStringWriter().WriteString(sRprXml);
 		// After first break, subsequent lines use body width (no firstLine indent)
 		m_bThaiFirstLineDone = true;
+		// Track that this C++ break needs to absorb an upcoming JS break
+		m_nThaiPendingCppBreaks++;
 		// m_dThaiAccumWidthPt is set by the caller to the width of the first word on the new line
 	};
 
@@ -5138,7 +5141,23 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		}
 		else if (bHasFontMetrics)
 		{
-			m_dThaiAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
+			// i == 0: first word of this run.
+			// Cross-run overflow check: if we're not at the start of a line and this
+			// Thai-starting word would overflow, break before it.
+			// sAccum is empty here, so flushAndBreak() just closes the empty run,
+			// emits <w:br/>, and opens a fresh run for the upcoming content.
+			double dSegWidthPt = MeasureWordWidthPt(pFontMgr, seg);
+			if (m_dThaiAccumWidthPt > 0.0 &&
+			    !seg.empty() && ThaiWordBreaker::IsThai(seg.front()) &&
+			    m_dThaiAccumWidthPt + dSegWidthPt > getEffectiveWidth())
+			{
+				flushAndBreak();
+				m_dThaiAccumWidthPt = dSegWidthPt;
+			}
+			else
+			{
+				m_dThaiAccumWidthPt += dSegWidthPt;
+			}
 		}
 
 		sAccum += seg;
@@ -5642,8 +5661,9 @@ int Binary_DocumentTableReader::ReadParagraph(BYTE type, long length, void* poRe
 		if (m_bIsThaiDistribute)
 		{
 			// Reset cross-run line-break state for the new paragraph
-			m_dThaiAccumWidthPt = 0.0;
-			m_bThaiFirstLineDone = false;
+			m_dThaiAccumWidthPt      = 0.0;
+			m_bThaiFirstLineDone     = false;
+			m_nThaiPendingCppBreaks  = 0;
 		}
 
 		// Capture page dimensions from sectPr (appears in last paragraph of each section)
@@ -8837,16 +8857,25 @@ int Binary_DocumentTableReader::ReadRunContent(BYTE type, long length, void* poR
 			// Pass through JS line-break and reset cross-run accumulator.
 			//
 			// Strategy:
-			//   ON-SCREEN paragraphs  (IsRecalculated=true):  JS injects correct <w:br/> at
-			//     word boundaries after computing the actual rendered line layout.  We trust
-			//     these positions and emit them verbatim.  Resetting m_dThaiAccumWidthPt
-			//     prevents the C++ overflow check from treating width accumulated on the
-			//     *previous* visual line as part of the *next* line.
+			//   ON-SCREEN paragraphs (IsRecalculated=true): JS injects <w:br/> after computing
+			//     the rendered line layout.  We normally trust these positions.
 			//
 			//   OFF-SCREEN paragraphs (IsRecalculated=false): JS never injects any linebreak
 			//     bytes, so this branch is never reached.  All breaks are produced by the
 			//     overflow check inside WriteThaiDistributeRunText (C++ algorithm).
-			GetCurrentStringWriter().WriteString(std::wstring(L"<w:br/>"));
+			//
+			//   Balance: when C++ inserts a break that JS did not (e.g. cross-run overflow at
+			//     i=0), the corresponding JS break would create an extra blank line.  Skip the
+			//     JS break in that case so the total break count stays correct.
+			if (m_nThaiPendingCppBreaks > 0)
+			{
+				// C++ already handled this line boundary — absorb the JS break silently.
+				--m_nThaiPendingCppBreaks;
+			}
+			else
+			{
+				GetCurrentStringWriter().WriteString(std::wstring(L"<w:br/>"));
+			}
 			m_dThaiAccumWidthPt  = 0.0;
 			m_bThaiFirstLineDone = true;
 		}
