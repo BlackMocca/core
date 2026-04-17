@@ -5052,12 +5052,41 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 		if (dBodyWidthPt < 36.0) // sanity: minimum 0.5 inch
 			dBodyWidthPt = 36.0;
 	}
+	// --- Resolve bold/italic style flags ---
+	// lStyle bits: 0x01 = italic, 0x02 = bold
+	// For Thai (complex script), prefer bCs/italicCs; fall back to b/italic.
+	auto resolveBold = [](const OOX::Logic::CRunProperty& rPr) -> bool {
+		if (rPr.m_oBoldCs.IsInit() && rPr.m_oBoldCs->m_oVal.IsInit())
+			return rPr.m_oBoldCs->m_oVal.ToBool();
+		if (rPr.m_oBold.IsInit() && rPr.m_oBold->m_oVal.IsInit())
+			return rPr.m_oBold->m_oVal.ToBool();
+		return false;
+	};
+	auto resolveItalic = [](const OOX::Logic::CRunProperty& rPr) -> bool {
+		if (rPr.m_oItalicCs.IsInit() && rPr.m_oItalicCs->m_oVal.IsInit())
+			return rPr.m_oItalicCs->m_oVal.ToBool();
+		if (rPr.m_oItalic.IsInit() && rPr.m_oItalic->m_oVal.IsInit())
+			return rPr.m_oItalic->m_oVal.ToBool();
+		return false;
+	};
+
+	bool bBold   = resolveBold(m_oCur_rPr);
+	bool bItalic = resolveItalic(m_oCur_rPr);
+	if (!bBold && pStyleRPr)   bBold   = resolveBold(*pStyleRPr);
+	if (!bItalic && pStyleRPr) bItalic = resolveItalic(*pStyleRPr);
+	if (!bBold)   bBold   = resolveBold(oDefRPr);
+	if (!bItalic) bItalic = resolveItalic(oDefRPr);
+
+	int nFontStyle = 0;
+	if (bItalic) nFontStyle |= 0x01;
+	if (bBold)   nFontStyle |= 0x02;
+
 	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
 	NSFonts::IFontManager* pFontMgr = m_oFontTableWriter.GetFontManager();
 	bool bHasFontMetrics = false;
 	if (pFontMgr)
 	{
-		int nLoadResult = pFontMgr->LoadFontByName(sFontName, dFontSizePt, 0, 72.0, 72.0);
+		int nLoadResult = pFontMgr->LoadFontByName(sFontName, dFontSizePt, nFontStyle, 72.0, 72.0);
 		if (nLoadResult)
 		{
 			pFontMgr->AfterLoad();
