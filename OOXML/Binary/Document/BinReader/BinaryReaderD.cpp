@@ -5056,16 +5056,16 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	// lStyle bits: 0x01 = italic, 0x02 = bold
 	// For Thai (complex script), prefer bCs/italicCs; fall back to b/italic.
 	auto resolveBold = [](const OOX::Logic::CRunProperty& rPr) -> bool {
-		if (rPr.m_oBoldCs.IsInit() && rPr.m_oBoldCs->m_oVal.IsInit())
+		if (rPr.m_oBoldCs.IsInit())
 			return rPr.m_oBoldCs->m_oVal.ToBool();
-		if (rPr.m_oBold.IsInit() && rPr.m_oBold->m_oVal.IsInit())
+		if (rPr.m_oBold.IsInit())
 			return rPr.m_oBold->m_oVal.ToBool();
 		return false;
 	};
 	auto resolveItalic = [](const OOX::Logic::CRunProperty& rPr) -> bool {
-		if (rPr.m_oItalicCs.IsInit() && rPr.m_oItalicCs->m_oVal.IsInit())
+		if (rPr.m_oItalicCs.IsInit())
 			return rPr.m_oItalicCs->m_oVal.ToBool();
-		if (rPr.m_oItalic.IsInit() && rPr.m_oItalic->m_oVal.IsInit())
+		if (rPr.m_oItalic.IsInit())
 			return rPr.m_oItalic->m_oVal.ToBool();
 		return false;
 	};
