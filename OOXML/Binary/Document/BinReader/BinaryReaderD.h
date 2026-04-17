@@ -506,7 +506,7 @@ public:
 	void WriteThaiDistributeRunText(const std::wstring& sText);
 	ThaiWordBreaker& GetThaiBreaker();
 	void UpdatePageSizeFromSectPr(const OOX::Logic::CSectionProperty& oSectPr);
-	double MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr, const std::wstring& sWord) const;
+	double MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr, const std::wstring& sWord, bool bFauxBold = false) const;
 	void PreScanForPageDimensions(); // pre-scan binary to extract sectPr page size before processing paragraphs
 };
 class Binary_NotesTableReader : public Binary_CommonReader

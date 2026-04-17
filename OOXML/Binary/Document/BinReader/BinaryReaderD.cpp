@@ -4901,7 +4901,8 @@ static inline bool IsThaiCombining(wchar_t c)
 }
 
 double Binary_DocumentTableReader::MeasureWordWidthPt(NSFonts::IFontManager* pFontMgr,
-                                                       const std::wstring& sWord) const
+                                                       const std::wstring& sWord,
+                                                       bool bFauxBold) const
 {
 	if (!pFontMgr || sWord.empty())
 		return 0.0;
@@ -4911,7 +4912,10 @@ double Binary_DocumentTableReader::MeasureWordWidthPt(NSFonts::IFontManager* pFo
 		if (IsThaiCombining(c))
 			continue; // zero advance — skip to avoid overcount
 		TBBoxAdvance adv = pFontMgr->MeasureChar2(static_cast<LONG>(c));
-		dWidth += static_cast<double>(adv.fAdvanceX);
+		double dAdv = static_cast<double>(adv.fAdvanceX);
+		if (bFauxBold)
+			dAdv += 1.0; // match FontFile.cpp:901 faux-bold: fAdvanceX += 1 per glyph
+		dWidth += dAdv;
 	}
 	return dWidth;
 }
@@ -5077,9 +5081,10 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	if (!bBold)   bBold   = resolveBold(oDefRPr);
 	if (!bItalic) bItalic = resolveItalic(oDefRPr);
 
+	// Always load the regular font variant. Bold is handled as faux bold (+1/glyph)
+	// to match the editor's CSS font-weight:bold rendering (not a separate bold font file).
 	int nFontStyle = 0;
-	if (bItalic) nFontStyle |= 0x01;
-	if (bBold)   nFontStyle |= 0x02;
+	if (bItalic) nFontStyle |= 0x02;  // FontManager.cpp: 0x02 = italic
 
 	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
 	NSFonts::IFontManager* pFontMgr = m_oFontTableWriter.GetFontManager();
@@ -5140,7 +5145,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 			if (prevIsBreakEnd && curStartsWithThai)
 			{
 				double dSegWidthPt = bHasFontMetrics
-				    ? MeasureWordWidthPt(pFontMgr, seg)
+				    ? MeasureWordWidthPt(pFontMgr, seg, bBold)
 				    : 0.0;
 
 				if (bHasFontMetrics && (m_dThaiAccumWidthPt + dSegWidthPt > getEffectiveWidth()))
@@ -5171,7 +5176,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 			}
 			else if (bHasFontMetrics)
 			{
-				m_dThaiAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg);
+				m_dThaiAccumWidthPt += MeasureWordWidthPt(pFontMgr, seg, bBold);
 			}
 		}
 		else if (bHasFontMetrics)
@@ -5181,7 +5186,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 			// Thai-starting word would overflow, break before it.
 			// sAccum is empty here, so flushAndBreak() just closes the empty run,
 			// emits <w:br/>, and opens a fresh run for the upcoming content.
-			double dSegWidthPt = MeasureWordWidthPt(pFontMgr, seg);
+			double dSegWidthPt = MeasureWordWidthPt(pFontMgr, seg, bBold);
 			if (m_dThaiAccumWidthPt > 0.0 &&
 			    !seg.empty() && ThaiWordBreaker::IsThai(seg.front()) &&
 			    m_dThaiAccumWidthPt + dSegWidthPt > getEffectiveWidth())
@@ -5212,7 +5217,7 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 			if (bHasFontMetrics)
 			{
 				std::wstring sSpaces(nTrail, L' ');
-				double dSpaceWidth = MeasureWordWidthPt(pFontMgr, sSpaces);
+				double dSpaceWidth = MeasureWordWidthPt(pFontMgr, sSpaces, bBold);
 				m_dThaiAccumWidthPt -= dSpaceWidth;
 				if (m_dThaiAccumWidthPt < 0.0)
 					m_dThaiAccumWidthPt = 0.0;
