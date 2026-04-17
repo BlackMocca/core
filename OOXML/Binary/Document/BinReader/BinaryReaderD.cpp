@@ -4912,10 +4912,9 @@ double Binary_DocumentTableReader::MeasureWordWidthPt(NSFonts::IFontManager* pFo
 		if (IsThaiCombining(c))
 			continue; // zero advance — skip to avoid overcount
 		TBBoxAdvance adv = pFontMgr->MeasureChar2(static_cast<LONG>(c));
-		double dAdv = static_cast<double>(adv.fAdvanceX);
-		if (bFauxBold)
-			dAdv += 1.0; // match FontFile.cpp:901 faux-bold: fAdvanceX += 1 per glyph
-		dWidth += dAdv;
+		dWidth += static_cast<double>(adv.fAdvanceX);
+		// Note: MeasureChar2 already includes the +1 faux-bold adjustment
+		// (FontFile.cpp:901) when SetNeedBold(true) was called by LoadFontByName.
 	}
 	return dWidth;
 }
@@ -5081,9 +5080,8 @@ void Binary_DocumentTableReader::WriteThaiDistributeRunText(const std::wstring& 
 	if (!bBold)   bBold   = resolveBold(oDefRPr);
 	if (!bItalic) bItalic = resolveItalic(oDefRPr);
 
-	// Always load the regular font variant. Bold is handled as faux bold (+1/glyph)
-	// to match the editor's CSS font-weight:bold rendering (not a separate bold font file).
 	int nFontStyle = 0;
+	if (bBold)   nFontStyle |= 0x01;  // FontManager.cpp: 0x01 = bold
 	if (bItalic) nFontStyle |= 0x02;  // FontManager.cpp: 0x02 = italic
 
 	// --- Load font into IFontManager (at DPI=72 → advance in points) ---
